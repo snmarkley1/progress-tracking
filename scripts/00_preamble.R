@@ -48,6 +48,7 @@ packages(tmap) # for mapping
 # packages(collapse) # for fmax, fmean, etc.
 packages(dotenv) # for putting DB details in .env file
 # packages(arcgisbinding)  # for arc.write
+packages(openxlsx)
 
 
 ## work in planar

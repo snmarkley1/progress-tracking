@@ -14,6 +14,9 @@
 
 source("scripts/00_preamble.R")
 
+## set
+last_date <- as.Date("2024-07-31")
+
 
 ## -------------------------------------------------------
 ## Import population data
@@ -123,6 +126,17 @@ query <- paste0(
       website_jurisdictionzone.geom IS NOT NULL
     GROUP BY
       jurisdiction_id
+  ),
+  F AS (
+    SELECT
+      jurisdiction_id,
+      SUM(st_npoints(geom)) AS vertex_count
+    FROM
+      website_jurisdictionzone
+    WHERE
+      website_jurisdictionzone.geom IS NOT NULL
+    GROUP BY
+      jurisdiction_id
   )
   SELECT
     website_jurisdiction.name AS jurisdiction,
@@ -150,13 +164,15 @@ query <- paste0(
 	  COALESCE(B.mapped_overlay_districts, 0) AS mapped_overlay_districts,
 	  COALESCE(C.unmapped_districts, 0) AS unmapped_districts,
 	  COALESCE(D.submitted_districts, 0) AS submitted_districts,
-	  COALESCE(E.geometry_added, 0) AS geometry_added
+	  COALESCE(E.geometry_added, 0) AS geometry_added,
+	  COALESCE(F.vertex_count, 0) AS vertex_count
   FROM
     A
 	  LEFT JOIN B ON B.jurisdiction_id = A.jurisdiction_id
 	  LEFT JOIN C ON C.jurisdiction_id = A.jurisdiction_id
 	  LEFT JOIN D ON D.jurisdiction_id = A.jurisdiction_id
 	  LEFT JOIN E ON E.jurisdiction_id = A.jurisdiction_id
+	  LEFT JOIN F on F.jurisdiction_id = A.jurisdiction_id
 	  JOIN website_jurisdiction ON website_jurisdiction.id = A.jurisdiction_id
     JOIN website_county ON website_jurisdiction.county_id = website_county.id
     JOIN website_state ON website_county.state_id = website_state.id
@@ -246,7 +262,134 @@ juris_combined <- juris_table_import |>
 
 
 ## -------------------------------------------------------------------
-## check total jurisdiction county by GIS analyst
+## Load in date table
+## -------------------------------------------------------------------
+
+date_table_import <- read.xlsx("input_tables/combined_hours.xlsx") |>
+  as_tibble() |>
+  mutate(Date = as.Date(Date) - years(70) - days(1)) |>
+  print()
+
+
+date_table <- date_table_import |>
+  select(1) |>
+  print()
+
+
+## -------------------------------------------------------------------
+## import all analysts
+## -------------------------------------------------------------------
+
+gis_analysts <- juris_combined |>
+  filter(!(gis_name == "Tara Safavian" & state == "California")) |>
+  filter(
+    gis_name %in%
+      c(
+        "Aidan Antonienko",
+        "Coral Troxell",
+        "Conor Nolan",
+        "Melissa Hayashida",
+        "Patrick DeHoyos",
+        "Dajoin Williams",
+        "Tara Safavian"
+      )
+  ) |>
+  mutate(
+    team = ifelse(str_detect(gis_email, "cornell"), "cornell", "luai"),
+    group = "gis",
+    date_joined = gis_date_joined + 7
+    ) |>
+  rename(
+    name = gis_name
+  ) |>
+  select(name, date_joined, team, group) |>
+  distinct() |>
+  print()
+
+
+zoning_analysts <- juris_combined |>
+  filter(!(zoning_name %in% c("Tara Safavian", "Anthony La") & state == "California")) |>
+  filter(
+    zoning_name %in% c(
+      "Anthony La",
+      "Ashleigh Graham-Clarke",
+      "Devon Chodzin",
+      "Jeff Conkle",
+      "Joanna Kaufman",
+      "Jonah Pellecchia",
+      "Junbo Huang",
+      "Olivia Ranseen",
+      #"Patrick DeHoyos",
+      "Rama Karlapalem"
+      #"Tara Safavian"
+    )
+  ) |>
+  mutate(
+    team = ifelse(str_detect(zoning_email, "cornell"), "cornell", "luai"),
+    group = "zoning",
+    date_joined = zoning_date_joined + 7
+  ) |>
+  rename(
+    name = zoning_name
+  ) |>
+  select(name, date_joined, team, group) |>
+  distinct() |>
+  print()
+
+
+## combine all analysts
+all_analysts <- bind_rows(gis_analysts, zoning_analysts) |>
+  arrange(name, team, group) |>
+  mutate(
+    start_date = 
+      ifelse(
+        str_detect(name, "Tara"),
+        date_joined + 14,
+        date_joined
+      ),
+    start_date = as.Date(start_date)
+  ) |>
+  group_by(name, group) |>
+  mutate(
+    end_date = ifelse(n() > 1, date(max(date_joined) - 1), Sys.Date() - 1),
+    end_date = ifelse(date_joined > max(end_date), Sys.Date() - 1, end_date),
+    end_date = as.Date(end_date)
+  ) |>
+  ungroup() |>
+  group_by(name, team, group) |>
+  mutate(
+    workdays = as.numeric(table(seq(start_date, end_date, "days") %in% date_table$Date)["TRUE"])
+  ) |>
+  ungroup() |>
+  mutate(
+    daily_hours = 
+      case_when(
+        str_detect(name, "Anthony") ~ 4,
+        str_detect(name, "Joanna|Melissa") ~ 7,
+        str_detect(name, "Jonah") & team == "cornell" ~ 7,
+        TRUE ~ 8
+      ),
+    pto_hours = 
+      case_when(
+        str_detect(name, "Aidan") ~ 162.5,
+        str_detect(name, "Coral") ~ 72.5,
+        str_detect(name, "Conor") ~ 119.5,
+        str_detect(name, "Melissa") ~ 64.5,
+        str_detect(name, "Joanna") ~ 115,
+        str_detect(name, "Junbo") ~ 32,
+        str_detect(name, "Rama") ~ 69.5,
+        str_detect(name, "Jonah") & team == "cornell" ~ 126,
+        TRUE ~ 0
+        ),
+    workhours = workdays * daily_hours - pto_hours
+  ) |>
+  filter(!(str_detect(name, "Joanna") & team == "luai")) |>
+  print()
+
+
+
+## -------------------------------------------------------------------
+## check count by GIS analyst
 ## -------------------------------------------------------------------
 
 gis_table_group <- juris_combined |>
@@ -268,8 +411,8 @@ gis_table_group <- juris_combined |>
     team = ifelse(str_detect(gis_email, "cornell"), "cornell", "luai"),
     jurisdiction_geo_added = ifelse(geometry_added > 0 | reviewstatus %in% c("zoning", "giszoning") | published == TRUE, 1, 0),
     geo_completed = ifelse(reviewstatus %in% c("zoning", "giszoning") | published == TRUE, 1, 0),
-    gis_date_joined = ifelse(gis_name == "Tara Safavian", as.Date("2024-03-25"), gis_date_joined),
-    gis_date_joined = as.Date(gis_date_joined)
+    #gis_date_joined = ifelse(gis_name == "Tara Safavian", as.Date("2024-03-25"), gis_date_joined),
+    #gis_date_joined = as.Date(gis_date_joined)
   ) |>
   filter(jurisdiction_geo_added == 1) |>
   group_by(gis_name, gis_date_joined, team) |>
@@ -279,12 +422,14 @@ gis_table_group <- juris_combined |>
     mean_population = mean(population),
     mean_districts = mean(total_districts),
     mean_mapped_overlay_districts = mean(mapped_overlay_districts),
+    #mean_vertex_count = mean(vertex_count),
     district_geo_added = sum(geometry_added),
     jurisdiction_geo_added = sum(jurisdiction_geo_added),
     jurisdiction_geo_completed = sum(geo_completed),
     total_jurisdiction_count = n()
   ) |>
   ungroup() |>
+  left_join(all_analysts, by = c("gis_name" = "name", "team")) |>
   # add additional fields
   mutate(
     strand_cleaning =
@@ -297,23 +442,6 @@ gis_table_group <- juris_combined |>
       ),
     overlay_adjustments = ifelse(str_detect(gis_name, "Aidan"), 93, 0),
     zoning_analysis = ifelse(gis_name %in% c("Patrick DeHoyos", "Tara Safavian"), "yes", "no"),
-    holidays =
-      case_when(
-        str_detect(gis_name, "Aidan") ~ 16,
-        str_detect(gis_name, "Coral|Conor|Melissa") ~ 12,
-        TRUE ~ 3
-      ),
-    pto =
-      case_when(
-        str_detect(gis_name, "Aidan") ~ 148,
-        str_detect(gis_name, "Coral") ~ 70.5,
-        str_detect(gis_name, "Conor") ~ 111.5,
-        str_detect(gis_name, "Melissa") ~ 50.5,
-        TRUE ~ 0
-      ),
-    workdays = (Sys.Date() - gis_date_joined) * 5 / 7 - holidays,
-    workhours = ifelse(gis_name == "Melissa Hayashida", workdays * 7, workdays * 8),
-    workhours = workhours - pto,
     adjusted_jurisdiction_count = jurisdiction_geo_added + 0.25 * strand_cleaning + 0.25 * overlay_adjustments,
     hours_per_juris = workhours / adjusted_jurisdiction_count
   ) |>
@@ -321,9 +449,12 @@ gis_table_group <- juris_combined |>
   #mutate(avg_juris_speed_by_team = mean(hours_per_juris)) |>
   #ungroup() |>
   arrange(gis_name) |>
-  select(-holidays, -pto, -zoning_analysis) |>
+  #select(-holidays, -pto) |>
   print()
 
+
+
+write_csv(gis_table_group, paste0("output_reports/gis_analysts_", Sys.Date(), ".csv"))
 
 
 ## ---------------------------------------------------------------------
@@ -344,14 +475,15 @@ zoning_table_group <- juris_combined |>
       "Jonah Pellecchia",
       "Junbo Huang",
       "Olivia Ranseen",
-      "Patrick DeHoyos",
-      "Rama Karlapalem",
-      "Tara Safavian"
+      #"Patrick DeHoyos",
+      "Rama Karlapalem"
+      #"Tara Safavian"
     )
   ) |>
   mutate(
     team = ifelse(str_detect(zoning_email, "cornell"), "cornell", "luai"),
-    finished_jurisdictions = ifelse(reviewstatus %in% c("gis", "giszoning") | published == "TRUE", 1, 0)
+    finished_jurisdictions = ifelse(reviewstatus %in% c("gis", "giszoning") | published == "TRUE", 1, 0),
+    finished_jurisdictions2 = ifelse(submitted_districts == total_districts, 1, 0)
     ) |>
   group_by(zoning_name, zoning_date_joined, team) |>
   summarize(
@@ -361,38 +493,21 @@ zoning_table_group <- juris_combined |>
     mean_population = mean(population),
     #total_districts = sum(total_districts),
     submitted_districts = sum(submitted_districts),
-    jurisdiction_count = sum(finished_jurisdictions)
+    jurisdiction_count = sum(finished_jurisdictions),
+    jurisdiction_count2 = sum(finished_jurisdictions2)
   ) |>
+  filter(!(str_detect(zoning_name, "Joanna") & team == "luai")) |>
+  left_join(all_analysts, by = c("zoning_name" = "name", "team")) |>
   mutate(
-    zoning_end_date = ifelse(n() > 1, date(max(zoning_date_joined)), Sys.Date()),
-    zoning_end_date = ifelse(zoning_date_joined == max(zoning_end_date), Sys.Date(), zoning_end_date),
-    zoning_end_date = as.Date(zoning_end_date)
+    submitted_districts_per_hour = submitted_districts / workhours,
+    hours_per_juris = workhours / jurisdiction_count,
+    hours_per_juris2 = workhours / jurisdiction_count2
   ) |>
-  ungroup() |>
-  mutate(
-    # holidays =
-    #   case_when(
-    #     zoning_date_joined, 
-    #     str_detect(gis_name, "Joanna") ~ 16,
-    #     str_detect(gis_name, "Coral|Conor|Melissa") ~ 12,
-    #     TRUE ~ 3
-    #   ),
-    # pto =
-    #   case_when(
-    #     str_detect(zoning_name, "Jonah" & team == "cornell") ~ 126,
-    #     str_detect(zoning_name, "Coral") ~ 70.5,
-    #     str_detect(gis_name, "Conor") ~ 111.5,
-    #     str_detect(gis_name, "Melissa") ~ 50.5,
-    #     TRUE ~ 0
-    #   ),
-    workdays = as.numeric(zoning_end_date - zoning_date_joined) * 5/7
-    #workdays = (Sys.Date() - gis_date_joined) * 5 / 7 - holidays,
-    #workhours = ifelse(gis_name == "Melissa Hayashida", workdays * 35, workdays * 40),
-    #workhours = workhours - pto,
-    #adjusted_jurisdiction_count = jurisdiction_count + 0.25 * strand_cleaning + 0.25 * overlay_adjustments,
-    #hours_per_juris = workhours / adjusted_jurisdiction_count
-    ) |>
   print()
+
+
+
+write_csv(zoning_table_group, paste0("output_reports/zoning_analysts_", Sys.Date(), ".csv"))
 
 
 ## figure out days
